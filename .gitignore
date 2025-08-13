@@ -1,0 +1,49 @@
+# --- Python ---
+venv/
+.venv/
+env/
+__pycache__/
+*.py[cod]
+*.pyc
+*.pyo
+*.pyd
+.python-version
+.ipynb_checkpoints/
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+dist/
+build/
+*.egg-info/
+
+# --- Node/JS (root と backend 配下の両方に効く) ---
+node_modules/
+**/node_modules/
+.npm/
+.yarn/
+.pnp.*
+.nyc_output/
+coverage/
+*.log
+
+# --- 秘密情報・環境 ---
+.env
+.env.*
+*.key
+*.pem
+*.p12
+*.crt
+*.der
+credentials*.json
+service-account*.json
+
+# --- OS/Editor ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+
+# --- 生成物（必要に応じて） ---
+tmp/
+.cache/
