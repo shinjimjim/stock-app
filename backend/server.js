@@ -1,20 +1,22 @@
-// 「Node.js（ESM）から Python を一発呼び出し → 返ってきた JSON をそのままHTTPレスポンスにする」という最小API
-// Express で Web サーバー（API）を立てる
-// /signal/:symbol にアクセスされたら、Pythonを子プロセスとして起動し、model.predict.predict_signal(symbol) を実行
-// Python が返す JSON をそのまま res.json(...) でフロントへ返す
+// Node.js（ESM）から Python を一発呼び出し → 返ってきた JSON をそのままHTTPレスポンスにする
 
-// ESM（type:"module"）の基本とファイルパス周り
-// ESM では require/module.exports ではなく import/export を使います（package.json に "type": "module" が必要）。
+// Node/Express で API サーバーを起動（CORS も許可）。
+// GET /signal/:symbol（例: /signal/8058.T）に来たら、子プロセスで Python を起動。
+// Python 側で model.predict.predict_signal(symbol) を実行して JSON を標準出力へ print。
+// Node 側はその stdout を JSON.parse して res.json(...) で返す。
+// GET /ohlc/:symbol も同様に model.ohlc.fetch_ohlc(symbol) を実行して返す。
+
+// ESM（"type": "module"）なので import 文を使う（CommonJS の require ではない）。
 import express from "express";
-import cors from "cors";
-import { spawn } from "child_process";
-import path from "path";
+import cors from "cors"; // cors：フロントが別オリジンでも API にアクセスできるようにする。
+import { spawn } from "child_process"; // child_process.spawn：外部プロセス（ここでは Python）を起動するために使用。
+import path from "path"; // path / fs：ファイルパス操作や存在チェックに使用。
 import fs from "fs";
 import { fileURLToPath } from "url";
 
 // __dirname 相当をESMで取得
 const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const __dirname = path.dirname(__filename); // ESM では __dirname がないため、自分自身の URL（file://）を実パスに変換してディレクトリ名を得る定型コード。
 
 // Express と CORS
 const app = express();
@@ -68,6 +70,40 @@ print(json.dumps(predict_signal("${symbol}"), ensure_ascii=False))
       return res.status(500).json({ error: "python_error", detail: stderr });
     }
     try { // 終了コードが 0 でも、stdout が純粋な JSON でないと JSON.parse が失敗 → parse_error として 500。
+      res.json(JSON.parse(stdout));
+    } catch (e) {
+      res.status(500).json({ error: "parse_error", detail: String(e), raw: stdout });
+    }
+  });
+});
+
+// OHLC エンドポイント
+app.get("/ohlc/:symbol", (req, res) => { // 構造は /signal と同じ。symbol の空チェックが追加され、タイムアウトは 20s に設定。
+  const symbol = (req.params.symbol || "").trim();
+  if (!symbol) return res.status(400).json({ error: "symbol required" });
+
+  const pyCode = `
+from model.ohlc import fetch_ohlc
+import json
+print(json.dumps(fetch_ohlc("${symbol}"), ensure_ascii=False))
+  `.trim(); // Python 側 fetch_ohlc も辞書（または配列）を返し、print(json.dumps(...)) で出力。
+
+  const child = spawn(PYTHON, ["-c", pyCode], {
+    cwd: path.join(__dirname, ".."),
+    env: process.env
+  });
+
+  let stdout = "", stderr = "";
+  const timer = setTimeout(() => child.kill("SIGKILL"), 20000);
+
+  child.stdout.on("data", d => stdout += d.toString("utf-8"));
+  child.stderr.on("data", d => stderr += d.toString("utf-8"));
+  child.on("close", (code) => {
+    clearTimeout(timer);
+    if (code !== 0) {
+      return res.status(500).json({ error: "python_error", detail: stderr || `exit ${code}` });
+    }
+    try {
       res.json(JSON.parse(stdout));
     } catch (e) {
       res.status(500).json({ error: "parse_error", detail: String(e), raw: stdout });
