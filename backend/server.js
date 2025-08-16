@@ -1,10 +1,10 @@
 // Node.js（ESM）から Python を一発呼び出し → 返ってきた JSON をそのままHTTPレスポンスにする
 
-// Node/Express で API サーバーを起動（CORS も許可）。
-// GET /signal/:symbol（例: /signal/8058.T）に来たら、子プロセスで Python を起動。
-// Python 側で model.predict.predict_signal(symbol) を実行して JSON を標準出力へ print。
-// Node 側はその stdout を JSON.parse して res.json(...) で返す。
-// GET /ohlc/:symbol も同様に model.ohlc.fetch_ohlc(symbol) を実行して返す。
+// 全体フロー
+// ブラウザ/フロントが GET /signal/:symbol（等）を叩く
+// Node が child_process.spawn() で Python を子プロセス起動（-c でインラインコード実行）
+// Python が predict_signal() / fetch_ohlc() / backtest_ma_cross() を実行し、JSON を stdout に print
+// Node が stdout を文字列で受け取り、JSON.parse → res.json で返す
 
 // ESM（"type": "module"）なので import 文を使う（CommonJS の require ではない）。
 import express from "express";
@@ -40,7 +40,10 @@ function resolvePythonPath() {
 
 const PYTHON = resolvePythonPath();
 
-// エンドポイント /signal/:symbol の流れ
+// /signal/:symbol ― 予測シグナルAPI
+// 役割
+// URL パラメータ :symbol を受け取り、Python の predict_signal(symbol) を呼ぶ。
+// Python から返る辞書を JSON として print → Node がそのまま返す。
 app.get("/signal/:symbol", (req, res) => { // URL の :symbol（例：/signal/8058.T）を受け取り、インラインの Python コードを -c で実行します。
   const symbol = req.params.symbol;
   const pyCode = `
@@ -77,7 +80,9 @@ print(json.dumps(predict_signal("${symbol}"), ensure_ascii=False))
   });
 });
 
-// OHLC エンドポイント（period/interval 対応）
+// /ohlc/:symbol ― 時系列（期間/間隔）API
+// 役割
+// symbol に加え、クエリ period・interval を Python に渡し、OHLC を返す。
 app.get("/ohlc/:symbol", (req, res) => {
   const symbol = (req.params.symbol || "").trim();
   if (!symbol) return res.status(400).json({ error: "symbol required" });
@@ -103,6 +108,44 @@ print(json.dumps(fetch_ohlc("${symbol}", period="${period}", interval="${interva
   child.stdout.on("data", d => stdout += d.toString("utf-8"));
   child.stderr.on("data", d => stderr += d.toString("utf-8"));
 
+  child.on("close", (code) => {
+    clearTimeout(timer);
+    if (code !== 0) return res.status(500).json({ error: "python_error", detail: stderr || `exit ${code}` });
+    try { res.json(JSON.parse(stdout)); }
+    catch (e) { res.status(500).json({ error: "parse_error", detail: String(e), raw: stdout }); }
+  });
+});
+
+// /backtest/:symbol ― シンプルMAクロスのバックテスト
+// 役割
+// symbol/period/interval に加え、fast/slow/fee_bps を渡してバックテスト。
+// 注意：Number(...) が NaN になった場合、テンプレ埋め込みだと Python コード中が NaN 文字列になり NameError で落ちます。
+app.get("/backtest/:symbol", (req, res) => {
+  const symbol = (req.params.symbol || "").trim();
+  if (!symbol) return res.status(400).json({ error: "symbol required" });
+
+  const period = (req.query.period || "2y").trim();
+  const interval = (req.query.interval || "1d").trim();
+  const fast = Number(req.query.fast || 5);
+  const slow = Number(req.query.slow || 20);
+  const fee_bps = Number(req.query.fee_bps || 5);
+
+  const pyCode = `
+from model.backtest import backtest_ma_cross
+import json
+print(json.dumps(backtest_ma_cross("${symbol}", "${period}", "${interval}", ${fast}, ${slow}, ${fee_bps}), ensure_ascii=False))
+  `.trim();
+
+  const child = spawn(PYTHON, ["-c", pyCode], {
+    cwd: path.join(__dirname, ".."),
+    env: process.env
+  });
+
+  let stdout = "", stderr = "";
+  const timer = setTimeout(() => child.kill("SIGKILL"), 25000);
+
+  child.stdout.on("data", d => stdout += d.toString("utf-8"));
+  child.stderr.on("data", d => stderr += d.toString("utf-8"));
   child.on("close", (code) => {
     clearTimeout(timer);
     if (code !== 0) return res.status(500).json({ error: "python_error", detail: stderr || `exit ${code}` });
