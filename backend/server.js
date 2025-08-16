@@ -77,16 +77,20 @@ print(json.dumps(predict_signal("${symbol}"), ensure_ascii=False))
   });
 });
 
-// OHLC エンドポイント
-app.get("/ohlc/:symbol", (req, res) => { // 構造は /signal と同じ。symbol の空チェックが追加され、タイムアウトは 20s に設定。
+// OHLC エンドポイント（period/interval 対応）
+app.get("/ohlc/:symbol", (req, res) => {
   const symbol = (req.params.symbol || "").trim();
   if (!symbol) return res.status(400).json({ error: "symbol required" });
+
+  // 例: /ohlc/8058.T?period=6mo&interval=1d
+  const period = (req.query.period || "2y").trim(); // 例: 6mo, 1y, 2y
+  const interval = (req.query.interval || "1d").trim(); // 例: 1d, 1h, 5m
 
   const pyCode = `
 from model.ohlc import fetch_ohlc
 import json
-print(json.dumps(fetch_ohlc("${symbol}"), ensure_ascii=False))
-  `.trim(); // Python 側 fetch_ohlc も辞書（または配列）を返し、print(json.dumps(...)) で出力。
+print(json.dumps(fetch_ohlc("${symbol}", period="${period}", interval="${interval}"), ensure_ascii=False))
+  `.trim();
 
   const child = spawn(PYTHON, ["-c", pyCode], {
     cwd: path.join(__dirname, ".."),
@@ -98,16 +102,12 @@ print(json.dumps(fetch_ohlc("${symbol}"), ensure_ascii=False))
 
   child.stdout.on("data", d => stdout += d.toString("utf-8"));
   child.stderr.on("data", d => stderr += d.toString("utf-8"));
+
   child.on("close", (code) => {
     clearTimeout(timer);
-    if (code !== 0) {
-      return res.status(500).json({ error: "python_error", detail: stderr || `exit ${code}` });
-    }
-    try {
-      res.json(JSON.parse(stdout));
-    } catch (e) {
-      res.status(500).json({ error: "parse_error", detail: String(e), raw: stdout });
-    }
+    if (code !== 0) return res.status(500).json({ error: "python_error", detail: stderr || `exit ${code}` });
+    try { res.json(JSON.parse(stdout)); }
+    catch (e) { res.status(500).json({ error: "parse_error", detail: String(e), raw: stdout }); }
   });
 });
 

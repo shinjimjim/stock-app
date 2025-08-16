@@ -1,79 +1,69 @@
-// 「軽量チャート（lightweight‑charts）」でローソク足を描く最小実装
+// 「最小実装＋移動平均（MA）オーバーレイ付き」の軽量チャート版
 
-// クライアント専用コンポーネント（"use client"）。
-// DOM 要素（div）の中に lightweight-charts のチャートを生成。
-// ローソク足シリーズ（Candlestick）を 1 本追加。
-// 受け取った data を流し込む。
-// コンテナの幅が変わったら ResizeObserver でチャート幅を追従。
-// アンマウント時に確実に後片付け。
+// "use client" で クライアント専用コンポーネントにする（SSR中は実行しない）。
+// lightweight-charts を 動的 import（useEffect内）して ブラウザだけで読み込む。
+// div コンテナに createChart() でチャート本体を作る。
+// ローソク足シリーズ（Candlestick）に data を setData()。
+// MA5／MA20 は LineSeries を2本追加して、それぞれ { time, value } を setData()。
+// ResizeObserver で 横幅の変化に追従。
+// アンマウント時に .remove()（メモリリーク＆二重初期化対策）。
 "use client";
 import { useEffect, useRef, useState } from "react";
 
-export default function LightweightChart({ data = [], height = 460 }) { // data: ローソク足配列（後述のフォーマット）。初期は空配列にしておく。height: ピクセル高さ。変更されると再初期化します（後述）。
-  // useRef は「React の再レンダリングを起こさず値を保持」するのに最適。チャート API は参照のまま持っておき、必要時に叩きます。
-  const containerRef = useRef(null); // チャートを入れる <div>
-  const chartRef = useRef(null); // createChart() の戻り（ChartAPI）
-  const seriesRef = useRef(null); // addCandlestickSeries() の戻り（SeriesAPI）
-  const [ready, setReady] = useState(false); // 初期化完了フラグ、ready は「チャートの初期化が終わったら true」にして、データ投入のタイミング制御に使っています。
+// ※ createChart は動的 import（前回修正版のまま）
+export default function LightweightChart({ data = [], height = 460, ma5 = [], ma20 = [] }) { // data: ローソク足配列（後述のフォーマット）。初期は空配列にしておく。height: ピクセル高さ。変更されると再初期化します。
+  // useRef は「再レンダリングなしで外部インスタンスを保持」するのに最適。チャート API は React state に入れず ref で持つのが定石です。
+  const containerRef = useRef(null); // チャートを入れる<div>の参照
+  const chartRef = useRef(null); // ChartAPI（createChartの戻り）
+  const candleRef = useRef(null); // CandlestickSeriesAPI
+  const ma5Ref = useRef(null); // LineSeriesAPI（MA5）
+  const ma20Ref = useRef(null); // LineSeriesAPI（MA20）
+  const [ready, setReady] = useState(false); // 初期化完了フラグ
 
-  // 初期化 useEffect（チャート生成と破棄）
+  // 初期化エフェクト（生成・リサイズ・破棄）
   useEffect(() => {
     let cleanup = () => {};
-    let chartApi, series;
-
     (async () => {
-      // ① クライアントでのみ動くよう動的 import
-      const { createChart } = await import("lightweight-charts"); // 動的 import：lightweight-charts は window に依存するため、SSR 中に読み込むと「document が無い」系のエラーになります。useEffect 内で await import(...) すればブラウザだけでロードされ安全。
-      const el = containerRef.current;
-      if (!el) return;
+      const { createChart } = await import("lightweight-charts"); // 動的 import：lightweight-charts は window を前提にするため、SSR 中に静的 import するとエラーになりがち。useEffect 内で読み込めば クライアント側のみ実行され安全。
+      const el = containerRef.current; if (!el) return;
 
-      // ② チャート生成（オプション）
-      chartApi = createChart(el, {
-        width: el.clientWidth, // コンテナの現在幅
-        height,
+      const chart = createChart(el, {
+        width: el.clientWidth, height,
         layout: { background: { color: "transparent" }, textColor: "#ddd" },
         grid: { vertLines: { color: "#2a2a2a" }, horzLines: { color: "#2a2a2a" } },
-        timeScale: { timeVisible: true, secondsVisible: false, borderColor: "#444" },
+        timeScale: { timeVisible: true, borderColor: "#444" },
         rightPriceScale: { borderColor: "#444" },
       });
+      const candle = chart.addCandlestickSeries(); // ★ローソク足
+      const ma5s = chart.addLineSeries({ lineWidth: 2 }); // ★MA5（線）
+      const ma20s = chart.addLineSeries({ lineWidth: 2 }); // ★MA20（線）
 
-      // ③ ローソク足シリーズを追加
-      series = chartApi.addCandlestickSeries();
-
-      // ④ 参照を保持 & レディに
-      chartRef.current = chartApi;
-      seriesRef.current = series;
+      chartRef.current = chart;
+      candleRef.current = candle;
+      ma5Ref.current = ma5s;
+      ma20Ref.current = ma20s;
       setReady(true);
 
-      // ⑤ リサイズ対応（横幅のみ可変）
-      const ro = new ResizeObserver(() => {
-        chartApi.applyOptions({ width: el.clientWidth }); // width: el.clientWidth：親の幅にフィットするよう初期幅を計測。さらに ResizeObserver で後続の幅変化にも追従。
-      });
+      const ro = new ResizeObserver(() => chart.applyOptions({ width: el.clientWidth })); // ResizeObserver：親要素の幅に追従。width: el.clientWidth を都度適用。
       ro.observe(el);
-
-      // ⑥ クリーンアップ
-      cleanup = () => {
-        ro.disconnect();
-        chartApi.remove(); // チャート DOM/イベントを破棄
-        chartRef.current = null;
-        seriesRef.current = null;
-      };
+      cleanup = () => { ro.disconnect(); chart.remove(); }; // cleanup（chart.remove()）：React 18 の Strict Mode ではエフェクトが 二重実行されます。破棄を入れないと 重複初期化やリークの原因に。
     })();
-
-    // ※ height が変わったら作り直す設計
-    return () => cleanup(); // cleanup：React 18 の Strict Mode（開発時）ではエフェクトが二重実行されるため、remove() で確実に破棄するのが大事。
+    return () => cleanup();
   }, [height]);
 
-  // データ投入 useEffect（描画 & 表示範囲調整）
+  // データ投入（ローソク足）
   useEffect(() => {
-    if (!ready || !seriesRef.current || !data?.length) return;
-    // ① データをシリーズへ
-    seriesRef.current.setData( // setData() は全置き換え：配列を丸ごと差し替えます。
-      data.map(d => ({ time: d.time, open: d.open, high: d.high, low: d.low, close: d.close })) // "YYYY-MM-DD" 文字列 or Unix秒 or BusinessDayオブジェクト
-    );
-    chartRef.current?.timeScale().fitContent(); // fitContent() で全データが収まるようスケール調整。
+    if (!ready || !candleRef.current || !data?.length) return;
+    candleRef.current.setData(data.map(d => ({ // setData() は全置き換え。リアルタイム更新なら update({time, open, high, low, close}) を使うと効率的。
+      time: d.time, open: d.open, high: d.high, low: d.low, close: d.close
+    })));
+    chartRef.current?.timeScale().fitContent();
   }, [ready, data]);
 
-  // JSX（DOM コンテナ）
+  // データ投入（MA5／MA20）
+  useEffect(() => { if (ready && ma5Ref.current) ma5Ref.current.setData(ma5); }, [ready, ma5]);
+  useEffect(() => { if (ready && ma20Ref.current) ma20Ref.current.setData(ma20); }, [ready, ma20]);
+
+  // // JSX（DOM コンテナ）
   return <div ref={containerRef} style={{ width: "100%", height }} />;
 }
